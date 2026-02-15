@@ -46,14 +46,22 @@ object HttpUtil {
 
     /**
      * Client for WebSocket connections.
-     * No read timeout, 1 minute ping interval, 10s connect timeout.
+     * No read timeout, configurable ping interval, 10s connect timeout.
+     * Note: When pingIntervalSeconds is 0, pings are disabled entirely. This may lead to
+     * dead connections not being detected on some networks, but the server also sends pings.
      */
-    suspend fun wsClient(context: Context, baseUrl: String): OkHttpClient {
-        return emptyClientBuilder(context, baseUrl)
+    suspend fun wsClient(context: Context, baseUrl: String, repository: io.heckel.ntfy.db.Repository): OkHttpClient {
+        val pingIntervalSeconds = repository.getWebSocketPingInterval()
+        var builder = emptyClientBuilder(context, baseUrl)
             .readTimeout(0, TimeUnit.MILLISECONDS)
-            .pingInterval(1, TimeUnit.MINUTES) // Technically not necessary, the server also pings us
             .connectTimeout(10, TimeUnit.SECONDS)
-            .build()
+        
+        // Only set ping interval if greater than 0; 0 means disabled
+        if (pingIntervalSeconds > 0) {
+            builder = builder.pingInterval(pingIntervalSeconds, TimeUnit.SECONDS)
+        }
+        
+        return builder.build()
     }
 
     fun requestBuilder(url: String, user: User? = null, customHeaders: List<CustomHeader> = emptyList()): Request.Builder {

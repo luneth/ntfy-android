@@ -41,7 +41,8 @@ data class ConnectionId(
     val headersHash: Int,        // Hash of sorted headers or 0 if none
     val trustedCertsHash: Int,   // Hash of trusted certificates or 0 if none
     val clientCertHash: Int,     // Hash of client certificate or 0 if none
-    val connectionForceReconnectVersion: Long   // Incremented to force reconnection for this baseUrl
+    val connectionForceReconnectVersion: Long,   // Incremented to force reconnection for this baseUrl
+    val websocketPingInterval: Long
 )
 
 fun isResponseCode(response: okhttp3.Response?, vararg codes: Int): Boolean {

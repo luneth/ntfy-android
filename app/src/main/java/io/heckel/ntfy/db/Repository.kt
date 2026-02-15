@@ -519,6 +519,16 @@ class Repository(private val sharedPrefs: SharedPreferences, database: Database)
         }
     }
 
+    fun getWebSocketPingInterval(): Long {
+        return sharedPrefs.getLong(SHARED_PREFS_WEBSOCKET_PING_INTERVAL, WEBSOCKET_PING_INTERVAL_DEFAULT)
+    }
+
+    fun setWebSocketPingInterval(seconds: Long) {
+        sharedPrefs.edit {
+            putLong(SHARED_PREFS_WEBSOCKET_PING_INTERVAL, seconds)
+        }
+    }
+
     private fun toSubscriptionList(list: List<SubscriptionWithMetadata>): List<Subscription> {
         return list.map { s ->
             Subscription(
@@ -624,6 +634,7 @@ class Repository(private val sharedPrefs: SharedPreferences, database: Database)
         const val SHARED_PREFS_UNIFIED_PUSH_BASE_URL = "UnifiedPushBaseURL" // Legacy key required for migration to DefaultBaseURL
         const val SHARED_PREFS_DEFAULT_BASE_URL = "DefaultBaseURL"
         const val SHARED_PREFS_LAST_TOPICS = "LastTopics"
+        const val SHARED_PREFS_WEBSOCKET_PING_INTERVAL = "WebSocketPingInterval"
 
         private const val LAST_TOPICS_COUNT = 3
 
@@ -663,6 +674,8 @@ class Repository(private val sharedPrefs: SharedPreferences, database: Database)
 
         const val WEBSOCKET_RECONNECT_REMIND_TIME_ALWAYS = 1L
         const val WEBSOCKET_RECONNECT_REMIND_TIME_NEVER = Long.MAX_VALUE
+
+        const val WEBSOCKET_PING_INTERVAL_DEFAULT = 60L
 
         private const val TAG = "NtfyRepository"
         private var instance: Repository? = null
