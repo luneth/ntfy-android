@@ -236,6 +236,7 @@ class SubscriberService : Service() {
                 val trustedCertsHash = repository.getTrustedCertificate(baseUrl)?.hashCode() ?: 0
                 val clientCertHash = repository.getClientCertificate(baseUrl)?.hashCode() ?: 0
                 val connectionForceReconnectVersion = repository.getConnectionForceReconnectVersion(baseUrl)
+                val websocketPingInterval = repository.getWebSocketPingInterval()
                 ConnectionId(
                     baseUrl = baseUrl,
                     topicsToSubscriptionIds = subs.associate { s -> s.topic to s.id },
@@ -244,7 +245,8 @@ class SubscriberService : Service() {
                     headersHash = headersHash,
                     trustedCertsHash = trustedCertsHash,
                     clientCertHash = clientCertHash,
-                    connectionForceReconnectVersion = connectionForceReconnectVersion
+                    connectionForceReconnectVersion = connectionForceReconnectVersion,
+                    websocketPingInterval = websocketPingInterval
                 )
             }
             .toSet()
@@ -271,7 +273,7 @@ class SubscriberService : Service() {
             val customHeaders = repository.getCustomHeaders(connectionId.baseUrl)
             val connection = if (connectionId.connectionProtocol == Repository.CONNECTION_PROTOCOL_WS) {
                 val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
-                val httpClient = HttpUtil.wsClient(this, connectionId.baseUrl)
+                val httpClient = HttpUtil.wsClient(this, connectionId.baseUrl, repository)
                 WsConnection(connectionId, repository, httpClient, user, customHeaders, ::onConnectionDetailsChanged, ::onNotificationReceived, alarmManager)
             } else {
                 JsonConnection(connectionId, repository, api, user, ::onConnectionDetailsChanged, ::onNotificationReceived, serviceActive)

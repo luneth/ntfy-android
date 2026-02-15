@@ -1018,6 +1018,44 @@ class SettingsActivity : AppCompatActivity(), PreferenceFragmentCompat.OnPrefere
         }
     }
 
+    @Keep
+    class ExperimentalSettingsFragment : BasePreferenceFragment() {
+        private lateinit var repository: Repository
+        private lateinit var serviceManager: SubscriberServiceManager
+
+        override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
+            setPreferencesFromResource(R.xml.experimental_preferences, rootKey)
+            repository = Repository.getInstance(requireActivity())
+            serviceManager = SubscriberServiceManager(requireActivity())
+            
+            // Load WebSocket ping interval preference
+            loadWebSocketPingIntervalPref()
+        }
+        
+        private fun loadWebSocketPingIntervalPref() {
+            val prefId = context?.getString(R.string.settings_experimental_websocket_ping_interval_key) ?: return
+            val pref: SeekBarPreference? = findPreference(prefId)
+            pref?.value = repository.getWebSocketPingInterval().toInt()
+            pref?.preferenceDataStore = object : PreferenceDataStore() {
+                override fun putInt(key: String?, value: Int) {
+                    repository.setWebSocketPingInterval(value.toLong())
+                    serviceManager.refresh() // Restart connections with new ping interval
+                }
+                override fun getInt(key: String?, defValue: Int): Int {
+                    return repository.getWebSocketPingInterval().toInt()
+                }
+            }
+            pref?.summaryProvider = Preference.SummaryProvider<SeekBarPreference> { preference ->
+                val value = preference.value
+                if (value == 0) {
+                    getString(R.string.settings_experimental_websocket_ping_interval_value_disabled)
+                } else {
+                    getString(R.string.settings_experimental_websocket_ping_interval_value_seconds, value)
+                }
+            }
+        }
+    }
+
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_CODE_WRITE_EXTERNAL_STORAGE_PERMISSION_FOR_AUTO_DOWNLOAD) {

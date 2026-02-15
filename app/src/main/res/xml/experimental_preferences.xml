@@ -1,0 +1,14 @@
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto"
+                  xmlns:android="http://schemas.android.com/apk/res/android"
+                  app:title="@string/settings_experimental_title">
+    <!-- WebSocket ping interval: default value must match Repository.WEBSOCKET_PING_INTERVAL_DEFAULT -->
+    <SeekBarPreference
+        app:key="@string/settings_experimental_websocket_ping_interval_key"
+        app:title="@string/settings_experimental_websocket_ping_interval_title"
+        app:summary="@string/settings_experimental_websocket_ping_interval_summary"
+        android:min="0"
+        android:max="300"
+        android:defaultValue="60"
+        app:showSeekBarValue="true"
+        app:seekBarIncrement="5"/>
+</PreferenceScreen>
