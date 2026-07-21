@@ -144,9 +144,13 @@ class WsConnection(
             action = SubscriberService.ACTION_RECONNECT_WS
             data = Uri.fromParts("ntfy", "reconnect", globalId.toString())
         }
+
+        // Stable, non-negative request code per connection/alarm
+        val requestCode = (globalId and 0x7fffffffL).toInt()
+
         return PendingIntent.getService(
             context,
-            0,
+            requestCode,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
