@@ -1,6 +1,10 @@
 package io.heckel.ntfy.service
 
 import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import io.heckel.ntfy.db.ConnectionState
 import io.heckel.ntfy.db.CustomHeader
@@ -18,7 +22,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -44,7 +47,8 @@ class WsConnection(
     private val customHeaders: List<CustomHeader>,
     private val connectionDetailsListener: (String, ConnectionState, Throwable?, Long) -> Unit,
     private val notificationListener: (Subscription, Notification) -> Unit,
-    private val alarmManager: AlarmManager
+    private val alarmManager: AlarmManager,
+    private val context: Context
 ) : Connection {
     private val parser = NotificationParser()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -63,6 +67,7 @@ class WsConnection(
 
     init {
         Log.d(TAG, "$shortUrl (gid=$globalId): New connection with global ID $globalId")
+        instances[globalId] = this
     }
 
     @Synchronized
@@ -87,6 +92,8 @@ class WsConnection(
     override fun close() {
         closed = true
         scope.cancel()
+        instances.remove(globalId)
+        alarmManager.cancel(createReconnectPendingIntent())
         if (webSocket == null) {
             Log.d(TAG,"$shortUrl (gid=$globalId): Not closing existing connection, because there is no active web socket")
             return
@@ -107,30 +114,42 @@ class WsConnection(
         Log.d(TAG,"$shortUrl (gid=$globalId): Scheduling a restart in $seconds seconds (via alarm manager)")
         val reconnectTime = Calendar.getInstance()
         reconnectTime.add(Calendar.SECOND, seconds)
-        // The AlarmManager callback runs on the main thread, but start() accesses the database,
-        // so we dispatch to a background thread using the connection's own scope.
-        val startOnBackgroundThread = { scope.launch { start() } }
+        val pendingIntent = createReconnectPendingIntent()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (alarmManager.canScheduleExactAlarms()) {
-                alarmManager.setExact(
+                alarmManager.setExactAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     reconnectTime.timeInMillis,
-                    RECONNECT_TAG,
-                    { startOnBackgroundThread() },
-                    null
+                    pendingIntent
                 )
             } else {
-                Log.d(TAG, "SCHEDULE_EXACT_ALARM permission denied: Failed to reschedule websocket connection")
+                Log.d(TAG, "SCHEDULE_EXACT_ALARM permission denied: Falling back to inexact alarm for websocket reconnect")
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    reconnectTime.timeInMillis,
+                    pendingIntent
+                )
             }
         } else {
-            alarmManager.setExact(
+            alarmManager.setExactAndAllowWhileIdle(
                 AlarmManager.RTC_WAKEUP,
                 reconnectTime.timeInMillis,
-                RECONNECT_TAG,
-                { startOnBackgroundThread() },
-                null
+                pendingIntent
             )
         }
+    }
+
+    private fun createReconnectPendingIntent(): PendingIntent {
+        val intent = Intent(context, SubscriberService::class.java).apply {
+            action = SubscriberService.ACTION_RECONNECT_WS
+            data = Uri.fromParts("ntfy", "reconnect", globalId.toString())
+        }
+        return PendingIntent.getService(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
     }
 
     private inner class Listener(private val id: Long) : WebSocketListener() {
@@ -217,9 +236,11 @@ class WsConnection(
 
     companion object {
         private const val TAG = "NtfyWsConnection"
-        private const val RECONNECT_TAG = "WsReconnect"
         private const val WS_CLOSE_NORMAL = 1000
         private val RETRY_SECONDS = listOf(5, 10, 15, 20, 30, 45, 60, 120)
         private val GLOBAL_ID = AtomicLong(0)
+        private val instances = java.util.concurrent.ConcurrentHashMap<Long, WsConnection>()
+
+        fun getById(id: Long): WsConnection? = instances[id]
     }
 }

@@ -66,7 +66,6 @@ import java.util.concurrent.ConcurrentHashMap
  * - https://gist.github.com/varunon9/f2beec0a743c96708eb0ef971a9ff9cd
  */
 class SubscriberService : Service() {
-    private var wakeLock: PowerManager.WakeLock? = null
     private var isServiceStarted = false
     private val repository by lazy { (application as Application).repository }
     private val dispatcher by lazy { NotificationDispatcher(this, repository) }
@@ -91,6 +90,20 @@ class SubscriberService : Service() {
             when (intent.action) {
                 Action.START.name -> startService()
                 Action.STOP.name -> stopService()
+                ACTION_RECONNECT_WS -> {
+                    val globalId = intent.data?.fragment?.toLongOrNull() ?: -1L
+                    val conn = if (globalId >= 0) WsConnection.getById(globalId) else null
+                    if (conn != null) {
+                        Log.d(TAG, "Reconnect alarm fired for gid=$globalId, restarting connection")
+                        GlobalScope.launch(Dispatchers.IO) {
+                            withWakeLock("reconnect", RECONNECT_WAKELOCK_TIMEOUT_MILLIS) {
+                                conn.start()
+                            }
+                        }
+                    } else {
+                        Log.d(TAG, "Reconnect alarm fired for gid=$globalId, but connection not found (already closed?)")
+                    }
+                }
                 else -> Log.w(TAG, "This should never happen. No action in the received intent")
             }
         } else {
@@ -153,6 +166,28 @@ class SubscriberService : Service() {
         super.onDestroy()
     }
 
+    /**
+     * Acquires a short, operation-scoped partial wakelock for [tagSuffix], executes [block],
+     * and always releases the lock in a finally clause.
+     *
+     * Requires the `android.permission.WAKE_LOCK` permission (declared in the manifest).
+     *
+     * @param tagSuffix Appended to [WAKE_LOCK_TAG] to produce the wakelock tag, e.g. "dispatch" → "SubscriberService:lock:dispatch"
+     * @param timeoutMs Maximum time in milliseconds to hold the lock before the OS auto-releases it; use [RECONNECT_WAKELOCK_TIMEOUT_MILLIS] or [DISPATCH_WAKELOCK_TIMEOUT_MILLIS]
+     * @param block The work to execute while the wakelock is held
+     * @return The value returned by [block]
+     */
+    private suspend inline fun <T> withWakeLock(tagSuffix: String, timeoutMs: Long, block: suspend () -> T): T {
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$WAKE_LOCK_TAG:$tagSuffix")
+        wl.acquire(timeoutMs)
+        return try {
+            block()
+        } finally {
+            if (wl.isHeld) wl.release()
+        }
+    }
+
     private fun startService() {
         if (isServiceStarted) {
             refreshConnections()
@@ -160,9 +195,6 @@ class SubscriberService : Service() {
         }
         Log.d(TAG, "Starting the foreground service task")
         isServiceStarted = true
-        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).run {
-            newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
-        }
         refreshConnections()
     }
 
@@ -173,15 +205,8 @@ class SubscriberService : Service() {
         connections.values.forEach { connection -> connection.close() }
         connections.clear()
 
-        // Releasing wake-lock and stopping ourselves
+        // Stopping ourselves
         try {
-            wakeLock?.let {
-                // Release all acquire()
-                while (it.isHeld) {
-                    it.release()
-                }
-            }
-            wakeLock = null
             stopForeground(true)
             stopSelf()
         } catch (e: Exception) {
@@ -282,7 +307,7 @@ class SubscriberService : Service() {
             val connection = if (connectionId.connectionProtocol == Repository.CONNECTION_PROTOCOL_WS) {
                 val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
                 val httpClient = HttpUtil.wsClient(this, connectionId.baseUrl)
-                WsConnection(connectionId, repository, httpClient, user, customHeaders, ::onConnectionDetailsChanged, ::onNotificationReceived, alarmManager)
+                WsConnection(connectionId, repository, httpClient, user, customHeaders, ::onConnectionDetailsChanged, ::onNotificationReceived, alarmManager, applicationContext)
             } else {
                 JsonConnection(connectionId, repository, api, user, ::onConnectionDetailsChanged, ::onNotificationReceived, serviceActive)
             }
@@ -420,42 +445,39 @@ class SubscriberService : Service() {
     }
 
     private fun onNotificationReceived(subscription: Subscription, notification: io.heckel.ntfy.db.Notification) {
-        // Wakelock while notifications are being dispatched
-        // Wakelocks are reference counted by default so that should work neatly here
-        wakeLock?.acquire(NOTIFICATION_RECEIVED_WAKELOCK_TIMEOUT_MILLIS)
-
         val url = topicUrl(subscription.baseUrl, subscription.topic)
         Log.d(TAG, "[$url] Received notification: $notification")
         GlobalScope.launch(Dispatchers.IO) {
-            // This logic is (partially) duplicated in
-            // - Android: SubscriberService::onNotificationReceived()
-            // - Android: FirebaseService::onMessageReceived()
-            // - Web app: hooks.js:handleNotification()
-            // - Web app: sw.js:handleMessage(), sw.js:handleMessageClear(), ...
+            withWakeLock("dispatch", DISPATCH_WAKELOCK_TIMEOUT_MILLIS) {
+                // This logic is (partially) duplicated in
+                // - Android: SubscriberService::onNotificationReceived()
+                // - Android: FirebaseService::onMessageReceived()
+                // - Web app: hooks.js:handleNotification()
+                // - Web app: sw.js:handleMessage(), sw.js:handleMessageClear(), ...
 
-            when (notification.event) {
-                ApiService.EVENT_MESSAGE_CLEAR -> {
-                    if (notification.sequenceId.isNotEmpty()) {
-                        repository.markAsReadBySequenceId(subscription.id, notification.sequenceId)
-                    }
-                    repository.updateLastNotificationId(subscription.id, notification.id)
-                    dispatcher.dispatch(subscription, notification)
-                }
-                ApiService.EVENT_MESSAGE_DELETE -> {
-                    if (notification.sequenceId.isNotEmpty()) {
-                        repository.markAsDeletedBySequenceId(subscription.id, notification.sequenceId)
-                    }
-                    repository.updateLastNotificationId(subscription.id, notification.id)
-                    dispatcher.dispatch(subscription, notification)
-                }
-                ApiService.EVENT_MESSAGE -> {
-                    val added = repository.addNotification(notification)
-                    if (added) {
+                when (notification.event) {
+                    ApiService.EVENT_MESSAGE_CLEAR -> {
+                        if (notification.sequenceId.isNotEmpty()) {
+                            repository.markAsReadBySequenceId(subscription.id, notification.sequenceId)
+                        }
+                        repository.updateLastNotificationId(subscription.id, notification.id)
                         dispatcher.dispatch(subscription, notification)
+                    }
+                    ApiService.EVENT_MESSAGE_DELETE -> {
+                        if (notification.sequenceId.isNotEmpty()) {
+                            repository.markAsDeletedBySequenceId(subscription.id, notification.sequenceId)
+                        }
+                        repository.updateLastNotificationId(subscription.id, notification.id)
+                        dispatcher.dispatch(subscription, notification)
+                    }
+                    ApiService.EVENT_MESSAGE -> {
+                        val added = repository.addNotification(notification)
+                        if (added) {
+                            dispatcher.dispatch(subscription, notification)
+                        }
                     }
                 }
             }
-            wakeLock?.let { if (it.isHeld) { it.release() } }
         }
     }
 
@@ -557,16 +579,18 @@ class SubscriberService : Service() {
         const val TAG = "NtfySubscriberService"
         const val SERVICE_START_WORKER_VERSION = BuildConfig.VERSION_CODE
         const val SERVICE_START_WORKER_WORK_NAME_PERIODIC = "NtfyAutoRestartWorkerPeriodic" // Do not change!
+        const val ACTION_RECONNECT_WS = "io.heckel.ntfy.RECONNECT_WS"
 
         private const val ONE_HOUR_SECONDS = 60 * 60L
         private const val ONE_HOUR_MILLIS = ONE_HOUR_SECONDS * 1000L
 
         private const val WAKE_LOCK_TAG = "SubscriberService:lock"
+        private const val RECONNECT_WAKELOCK_TIMEOUT_MILLIS = 30_000L /*30 seconds*/
+        private const val DISPATCH_WAKELOCK_TIMEOUT_MILLIS = 30_000L /*30 seconds; kept separate from reconnect for independent tuning*/
         private const val NOTIFICATION_CHANNEL_ID = "ntfy-subscriber"
         private const val NOTIFICATION_CONNECTION_ALERT_CHANNEL_ID = "ntfy-connection-alert"
         private const val NOTIFICATION_GROUP_ID = "io.heckel.ntfy.NOTIFICATION_GROUP_SERVICE"
         private const val NOTIFICATION_SERVICE_ID = 2586
-        private const val NOTIFICATION_RECEIVED_WAKELOCK_TIMEOUT_MILLIS = 10 * 60 * 1000L /*10 minutes*/
 
         const val NOTIFICATION_CONNECTION_ALERT_ID = 2587
         private const val CONNECTION_ALERT_SNOOZE_SHORT_HOURS = 1
@@ -587,3 +611,4 @@ class SubscriberService : Service() {
         private const val REQUEST_CODE_DISMISS = 4
     }
 }
+
